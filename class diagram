@@ -1,0 +1,160 @@
+!pip install spacy -q
+!python -m spacy download en_core_web_lg -q
+!pip install pattern -q
+!pip install -U pattern -q
+!pip install vaderSentiment -q
+import spacy
+import pandas as pd
+from pattern.en import conjugate, PRESENT, SG, PLURAL
+import gensim.downloader as api
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+import matplotlib.pyplot as plt
+import seaborn as sns
+import time
+from sklearn.metrics import confusion_matrix
+import numpy as np
+
+# Load the English NLP model from SpaCy
+nlp = spacy.load("en_core_web_lg")
+
+class TextAnalyzer:
+    def _init_(self):
+        self.nlp = nlp
+        self.glove_model = api.load("glove-wiki-gigaword-300")
+        self.sentiment_analyzer = SentimentIntensityAnalyzer()
+        self.timing = {'sentence_construction_time': [], 'sentiment_analysis_time': []}
+
+    def load_deverbal_nouns(self, filename):
+        df = pd.read_excel(filename)
+        return set(df['Deverbal Noun'].str.lower())
+
+    def preprocess_text(self, text):
+        text = text.replace('\n', ' ').replace('\r', '').strip()
+        return text
+
+    def is_semantically_compatible(self, verb, obj):
+        if verb in self.glove_model and obj in self.glove_model:
+            similarity = self.glove_model.similarity(verb, obj)
+            if similarity > 0.2:
+                return True
+
+        return False
+
+    def identify_verbs_and_deverbal_nouns(self, doc, deverbal_nouns):
+        verbs = set()
+        be_forms = {'be', 'is', 'am', 'are', 'was', 'were'}
+        for token in doc:
+            if (token.pos_ == 'VERB' and token.lemma_ not in be_forms) or token.text.lower() in deverbal_nouns:
+                verbs.add(token.lemma_)
+        return verbs
+
+    def extract_entities(self, doc):
+        subjects, objects, locations = set(), set(), set()
+        for token in doc:
+            if token.dep_ in {'nsubj', 'nsubjpass'} and token.pos_ != 'PRON':
+                form = 'plural' if token.tag_ in ['NNS', 'NNPS'] else 'singular'
+                is_person = token.ent_type_ == 'PERSON'
+                subjects.add((token.text, form, is_person))
+            if token.dep_ in {'dobj', 'pobj'}:
+                objects.add(token.text)
+            if token.ent_type_ in {'LOC', 'GPE'}:
+                locations.add(token.text)
+        return subjects, objects, locations
+
+    def conjugate_verb(self, verb, number, tense="present"):
+        return conjugate(verb, tense=PRESENT, number={'singular': SG, 'plural': PLURAL}[number])
+
+    def generate_sentences(self, subjects, verbs, objects, locations):
+        sentences = []
+        for subject, number, is_person in subjects:
+            is_are = "is" if number == 'singular' else "are"
+            article = "" if is_person else "The"
+            for verb in verbs:
+                for object in objects:
+                    if self.is_semantically_compatible(verb, object):
+                        sentences.append(f"{article} {subject} {self.conjugate_verb(verb, number)} {object}.")
+            for verb in verbs:
+                sentences.append(f"{article} {subject} {is_are} {verb}ing.")
+
+            for location in locations:
+                for verb in verbs:
+                    sentences.append(f"{article} {subject} {is_are} {verb}ing at {location}.")
+
+        return sentences
+
+    def analyze_sentiment(self, sentences):
+        sentiments = [self.sentiment_analyzer.polarity_scores(sentence)['compound'] for sentence in sentences]
+        sentiment_labels = ['positive' if sentiment >= 0.05 else 'negative' for sentiment in sentiments]
+        return sentiment_labels, sentiments
+
+    def main(self):
+        start_time = time.time()
+
+        deverbal_nouns = self.load_deverbal_nouns("/content/dv.xlsx")
+        print("Please enter a passage:")
+        user_input = self.preprocess_text(input())
+        doc = self.nlp(user_input)
+        
+        verbs, subjects, objects, locations = self.identify_verbs_and_deverbal_nouns(doc, deverbal_nouns), *self.extract_entities(doc)
+        
+        print("Identified Verbs:", verbs)
+        print("Identified Subjects:", subjects)
+        print("Identified Objects:", objects)
+
+        sentences = self.generate_sentences(subjects, verbs, objects, locations)
+        for sentence in sentences:
+            print(f"Sentence: {sentence}")
+
+        end_time = time.time()
+        self.timing['sentence_construction_time'].append(end_time - start_time)
+        print("Total time for sentence construction:", self.timing['sentence_construction_time'][-1])
+
+        # Sentiment analysis timing
+        start_time = time.time()
+        sentiment_labels, sentiments = self.analyze_sentiment(sentences)
+        end_time = time.time()
+        self.timing['sentiment_analysis_time'].append(end_time - start_time)
+
+        for i, sentence in enumerate(sentences):
+            print(f"Sentence: {sentence} - Sentiment: {sentiment_labels[i]}")
+
+        print("Total time for sentiment analysis:", self.timing['sentiment_analysis_time'][-1])
+
+        # Space for Performance Metrics
+        print("\nPerformance Metrics:")
+        performance_data = {
+            'Task': ['Sentence Construction', 'Sentiment Analysis'],
+            'Time': [self.timing['sentence_construction_time'][-1], self.timing['sentiment_analysis_time'][-1]]
+        }
+        performance_df = pd.DataFrame(performance_data)
+        print(performance_df)
+
+        # Creating and displaying data visualization
+        plt.figure(figsize=(8, 6))
+        sns.heatmap(performance_df.set_index('Task'), annot=True, cmap="RdYlBu_r", fmt=".2f")
+        plt.title('Performance Metrics')
+        plt.show()
+
+        # Plotting the relationship between verbs and reconstructed sentences
+        num_verbs = [len(verbs)] * len(sentences)
+        plt.figure(figsize=(8, 6))
+        plt.plot(num_verbs, range(1, len(sentences) + 1), marker='o')
+        plt.xlabel('Number of Verbs')
+        plt.ylabel('Number of Sentences')
+        plt.title('Relationship between Verbs and Reconstructed Sentences')
+        plt.tight_layout()
+        plt.show()
+
+        # Confusion Matrix for Sentiment Analysis
+        cm = confusion_matrix([1 if label == 'positive' else 0 for label in sentiment_labels],
+                              [1 if sentiment >= 0.05 else 0 for sentiment in sentiments])
+        plt.figure(figsize=(8, 6))
+        sns.heatmap(cm, annot=True, cmap="Blues", fmt="d")
+        plt.xlabel('Predicted')
+        plt.ylabel('Actual')
+        plt.title('Confusion Matrix for Sentiment Analysis')
+        plt.show()
+
+if _name_ == "_main_":
+    analyzer = TextAnalyzer()
+    analyzer.main()
